@@ -139,32 +139,28 @@ final class StatsStore: ObservableObject {
                     fresh += Self.parseZip(url, progress: reporter)
                 case "json":
                     if let data = try? Data(contentsOf: url) {
-                        fresh += HistoryParser.parse(data: data)
+                        fresh += StreamingHistoryParser.parse(data: data)
                     }
                 default:
                     break
                 }
             }
+            // マージ（重複除去＋並べ替え）も重い処理なので、メインスレッドではなく
+            // ここ（バックグラウンド）で済ませてから結果だけを渡す。
+            // ※v1.1まではこの処理をメインスレッドで実行しており、進捗表示が
+            //   14/14 のまま固まって見えた
+            let existing = await MainActor.run { [weak self] in self?.entries ?? [] }
+            let merged = Self.mergeEntries(existing: existing, fresh: fresh)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 if fresh.isEmpty {
                     self.statusText = "再生履歴のJSONが見つかりませんでした。Spotifyの「拡張ストリーミング履歴」のzipかどうか確認してください。"
                 } else {
-                    var seen = Set(self.entries.map { "\($0.t)|\($0.key)|\($0.ms)" })
-                    var added = 0
-                    for e in fresh {
-                        let k = "\(e.t)|\(e.key)|\(e.ms)"
-                        if !seen.contains(k) {
-                            seen.insert(k)
-                            self.entries.append(e)
-                            added += 1
-                        }
-                    }
-                    self.entries.sort { $0.t < $1.t }
-                    self.saveSnapshot(self.entries)
-                    self.statusText = added > 0
-                        ? "\(Fmt.num(added)) 件を追加しました（全 \(Fmt.num(self.entries.count)) 件）"
-                        : "新しい再生履歴はありませんでした（全 \(Fmt.num(self.entries.count)) 件）"
+                    self.entries = merged.entries
+                    self.saveSnapshot(merged.entries)
+                    self.statusText = merged.added > 0
+                        ? "\(Fmt.num(merged.added)) 件を追加しました（全 \(Fmt.num(merged.entries.count)) 件）"
+                        : "新しい再生履歴はありませんでした（全 \(Fmt.num(merged.entries.count)) 件）"
                 }
                 self.isBusy = false
                 self.progressText = ""
@@ -205,10 +201,27 @@ final class StatsStore: ObservableObject {
             _ = try? archive.extract(entry) { chunk in
                 data.append(chunk)
             }
-            out += HistoryParser.parse(data: data)
+            out += StreamingHistoryParser.parse(data: data)
             done += 1
             progress?("読み込み中… \(done) / \(targets.count) ファイル（\(Fmt.num(out.count)) 件）")
         }
         return out
+    }
+
+    /// 既存データと新規データを重複除去してマージし、時系列順に並べ替える
+    nonisolated private static func mergeEntries(existing: [PlayEntry], fresh: [PlayEntry]) -> (entries: [PlayEntry], added: Int) {
+        var seen = Set(existing.map { "\($0.t)|\($0.key)|\($0.ms)" })
+        var result = existing
+        var added = 0
+        for e in fresh {
+            let k = "\(e.t)|\(e.key)|\(e.ms)"
+            if !seen.contains(k) {
+                seen.insert(k)
+                result.append(e)
+                added += 1
+            }
+        }
+        result.sort { $0.t < $1.t }
+        return (result, added)
     }
 }

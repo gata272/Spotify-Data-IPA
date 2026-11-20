@@ -71,12 +71,16 @@ struct ChartsView: View {
     }
 
     var body: some View {
+        // filled（全日埋め）は複数プロパティから参照されるため、入口で1回だけ作る
+        let filled = DayAggregator.filledDays(scoped)
         let months = monthItems
-        let days = dayItems
+        let days = filled.map { row in
+            BarItem(label: Fmt.date(row.date), value: row.ms, sub: "\(Fmt.num(row.plays)) 回")
+        }
         let hours = hourItems
         let weekdays = weekdayItems
         let dayRows = sortedDayRows
-        let note = dayNote
+        let note = dayNote(filled: filled)
         return NavigationStack {
             List {
                 if !model.artist.isEmpty {
@@ -151,14 +155,6 @@ struct ChartsView: View {
         return order.map { BarItem(label: $0, value: map[$0] ?? 0) }
     }
 
-    private var filled: [DayAgg] { DayAggregator.filledDays(scoped) }
-
-    private var dayItems: [BarItem] {
-        filled.map { row in
-            BarItem(label: Fmt.date(row.date), value: row.ms, sub: "\(Fmt.num(row.plays)) 回")
-        }
-    }
-
     private var sortedDayRows: [DayAgg] {
         let rows = DayAggregator.daysPresent(scoped)
         switch daySort {
@@ -168,8 +164,7 @@ struct ChartsView: View {
         }
     }
 
-    private var dayNote: String? {
-        let rows = filled
+    private func dayNote(filled rows: [DayAgg]) -> String? {
         guard !rows.isEmpty, let best = rows.max(by: { $0.ms < $1.ms }) else { return nil }
         let total = rows.reduce(0) { $0 + $1.ms }
         let avg = rows.isEmpty ? 0 : total / rows.count

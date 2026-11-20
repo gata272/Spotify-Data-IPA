@@ -112,9 +112,19 @@ enum HistoryParser {
         isoFractional.date(from: s) ?? isoPlain.date(from: s)
     }
 
+    /// 履歴オブジェクト1件をPlayEntryに変換する（parse本体とストリーミング版で共用）
+    static func convertOne(_ d: [String: Any]) -> PlayEntry? {
+        let single = convert([d])
+        return single.first
+    }
+
     static func parse(data: Data) -> [PlayEntry] {
         guard let obj = try? JSONSerialization.jsonObject(with: data),
               let arr = obj as? [[String: Any]] else { return [] }
+        return convert(arr)
+    }
+
+    private static func convert(_ arr: [[String: Any]]) -> [PlayEntry] {
         var out: [PlayEntry] = []
         out.reserveCapacity(arr.count)
         for d in arr {
@@ -160,6 +170,69 @@ enum HistoryParser {
                     key: track + "|" + (artist ?? ""),
                     ep: false))
             }
+        }
+        return out
+    }
+}
+
+/// ストリーミング読み込み：トップレベルの配列要素を1件ずつ切り出して変換する。
+/// ファイル全体をJSONSerializationで変換すると、元の履歴オブジェクト（1件あたり
+/// 約25項目）を全件分メモリに抱えることになり、LiveContainer内では処理が
+/// 事実上止まって見える。ここでは変換済みの小さなPlayEntryだけを保持し、
+/// 元のオブジェクトはその場で捨てる。進捗コールバックつき。
+enum StreamingHistoryParser {
+    static func parse(data: Data, progress: ((Int) -> Void)? = nil) -> [PlayEntry] {
+        guard let text = String(data: data, encoding: .utf8) else {
+            return HistoryParser.parse(data: data)
+        }
+        let scalars = Array(text.unicodeScalars)
+        let n = scalars.count
+        var out: [PlayEntry] = []
+        out.reserveCapacity(20000)
+        var i = 0
+        while i < n && scalars[i] != "[" { i += 1 }
+        i += 1
+        var depth = 0
+        var inStr = false
+        var esc = false
+        var start = -1
+        var converted = 0
+        while i < n {
+            let c = scalars[i]
+            if inStr {
+                if esc { esc = false }
+                else if c == "\\" { esc = true }
+                else if c == "\"" { inStr = false }
+                i += 1
+                continue
+            }
+            if c == "\"" { inStr = true; i += 1; continue }
+            if c == "{" {
+                if depth == 0 { start = i }
+                depth += 1; i += 1; continue
+            }
+            if c == "}" {
+                depth -= 1
+                i += 1
+                if depth == 0 && start >= 0 {
+                    let slice = String(String.UnicodeScalarView(scalars[start..<i]))
+                    if let d = slice.data(using: .utf8),
+                       let obj = try? JSONSerialization.jsonObject(with: d),
+                       let dict = obj as? [String: Any],
+                       let e = HistoryParser.convertOne(dict) {
+                        out.append(e)
+                    }
+                    start = -1
+                    converted += 1
+                    if converted % 2000 == 0 { progress?(out.count) }
+                }
+                continue
+            }
+            if c == "]" && depth == 0 { break }
+            i += 1
+        }
+        if out.isEmpty && (text.contains("\"ts\"") || text.contains("\"endTime\"")) {
+            return HistoryParser.parse(data: data) // 念のための従来方式フォールバック
         }
         return out
     }

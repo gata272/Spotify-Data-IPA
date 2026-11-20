@@ -9,13 +9,20 @@ struct HomeView: View {
     private var list: [PlayEntry] { model.filtered(store.entries) }
 
     var body: some View {
-        NavigationStack {
+        // 集計はbodyの入口でまとめて1回だけ行う。各セクションが個別に
+        // 全件走査すると、画面が表示されるまで固まって見えるため
+        let list = self.list
+        let agg = Aggregator.aggregate(list)
+        let insights = Insights.compute(list: list, all: store.entries)
+        let comparison = Comparator.compare(entries: store.entries, from: model.from, to: model.to,
+                                            minMs: model.minMs, includePodcast: model.includePodcast)
+        return NavigationStack {
             List {
                 periodSection
-                summarySection
-                insightsSection
-                compareSection
-                shareSection
+                summarySection(list: list, agg: agg)
+                insightsSection(insights: insights)
+                compareSection(comparison: comparison)
+                shareSection(list: list, agg: agg, insights: insights)
                 dataSection
             }
             .navigationTitle("Spotify統計")
@@ -78,9 +85,8 @@ struct HomeView: View {
 
     // MARK: - サマリー
 
-    private var summarySection: some View {
+    private func summarySection(list: [PlayEntry], agg: (artists: [String: ArtistAgg], tracks: [String: TrackAgg])) -> some View {
         Section("サマリー") {
-            let agg = Aggregator.aggregate(list)
             let totalMs = list.reduce(0) { $0 + $1.ms }
             let days = list.isEmpty ? 0 : max(1, Int((Double(list[list.count - 1].t - list[0].t) / 86_400_000).rounded()) + 1)
             let top = Aggregator.sortArtists(agg.artists, byTime: true).first
@@ -99,9 +105,9 @@ struct HomeView: View {
 
     // MARK: - ハイライト
 
-    private var insightsSection: some View {
+    private func insightsSection(insights: Insights?) -> some View {
         Section("この期間のハイライト") {
-            if let ins = Insights.compute(list: list, all: store.entries) {
+            if let ins = insights {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                     InsightCardView(title: "いちばん聴いた日", value: Fmt.date(ins.bestDay),
                                     sub: "\(Fmt.dur(ms: ins.bestDayMs)) ／ \(Fmt.num(ins.bestDayPlays))回聴きました")
@@ -130,10 +136,9 @@ struct HomeView: View {
 
     // MARK: - 前期間との比較
 
-    private var compareSection: some View {
+    private func compareSection(comparison: PeriodComparison) -> some View {
         Section("前期間との比較") {
-            let cmp = Comparator.compare(entries: store.entries, from: model.from, to: model.to,
-                                         minMs: model.minMs, includePodcast: model.includePodcast)
+            let cmp = comparison
             if cmp.hasPrev {
                 compareRow(title: "総再生時間", now: Fmt.dur(ms: cmp.curMs), prev: Fmt.dur(ms: cmp.prevMs),
                            pct: pctChange(cur: cmp.curMs, prev: cmp.prevMs))
@@ -181,10 +186,10 @@ struct HomeView: View {
 
     // MARK: - まとめカード
 
-    private var shareSection: some View {
+    private func shareSection(list: [PlayEntry], agg: (artists: [String: ArtistAgg], tracks: [String: TrackAgg]), insights: Insights?) -> some View {
         Section("まとめカード") {
             Button {
-                makeShareImage()
+                makeShareImage(list: list, agg: agg, insights: insights)
             } label: {
                 Label("この期間のまとめを画像でシェア", systemImage: "square.and.arrow.up")
             }
@@ -195,9 +200,8 @@ struct HomeView: View {
     }
 
     @MainActor
-    private func makeShareImage() {
-        let agg = Aggregator.aggregate(list)
-        let ins = Insights.compute(list: list, all: store.entries)
+    private func makeShareImage(list: [PlayEntry], agg: (artists: [String: ArtistAgg], tracks: [String: TrackAgg]), insights: Insights?) {
+        let ins = insights
         let card = ShareCardView(
             periodLabel: "\(Fmt.date(model.from)) 〜 \(Fmt.date(model.to))",
             totalMs: list.reduce(0) { $0 + $1.ms },
