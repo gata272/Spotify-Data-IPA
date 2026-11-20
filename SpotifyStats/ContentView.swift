@@ -6,7 +6,10 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if store.entries.isEmpty {
+            if store.entries.isEmpty && !model.ready {
+                // データ読込中（または未読込）の画面。タブの重い集計を同期的に
+                // 構築すると初回画面が出るまで固まるため、まずこの画面を即表示し、
+                // タブ側は次の描画サイクルで切り替える
                 ImportView()
             } else {
                 TabView(selection: $model.tab) {
@@ -34,6 +37,15 @@ struct ContentView: View {
                 model.to = mx
                 model.preset = "all"
                 model.periodInitialized = true
+            }
+        }
+        .onChange(of: store.isBusy) { _, busy in
+            if !busy && !store.entries.isEmpty {
+                // 読み戻し完了。まず画面を描画させてからタブへ切り替える
+                Task { @MainActor in
+                    await Task.yield()
+                    model.ready = true
+                }
             }
         }
     }
@@ -70,6 +82,11 @@ struct ImportView: View {
                         .tint(.green)
                     if store.isBusy {
                         ProgressView()
+                        if !store.progressText.isEmpty {
+                            Text(store.progressText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     if !store.statusText.isEmpty {
                         Text(store.statusText)

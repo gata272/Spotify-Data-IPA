@@ -11,6 +11,9 @@ final class AppModel: ObservableObject {
     @Published var artist: String = ""
     /// データ初回読み込み時に期間を全期間へ初期化したかどうか
     var periodInitialized = false
+    /// タブ画面を表示してよい状態か。データの読み戻しが終わってから
+    /// trueにし、重い集計は画面表示後に走らせる
+    @Published var ready = false
 
     var minMs: Int { minPlay30 ? 30000 : 0 }
 

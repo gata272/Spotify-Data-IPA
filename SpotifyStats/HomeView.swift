@@ -25,6 +25,7 @@ struct HomeView: View {
                     store.deleteAllData()
                     model.artist = ""
                     model.periodInitialized = false
+                    model.ready = false
                 }
                 Button("キャンセル", role: .cancel) {}
             } message: {
@@ -224,7 +225,7 @@ struct HomeView: View {
             if store.isBusy {
                 HStack {
                     ProgressView()
-                    Text("処理中…")
+                    Text(store.progressText.isEmpty ? "処理中…" : store.progressText)
                         .foregroundStyle(.secondary)
                 }
             }
