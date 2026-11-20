@@ -54,7 +54,7 @@ final class AppModel: ObservableObject {
 
     func years(in entries: [PlayEntry]) -> [Int] {
         var set = Set<Int>()
-        for e in entries { set.insert(Calendar.current.component(.year, from: e.date)) }
+        for e in entries { set.insert(e.mon / 12) }
         return set.sorted()
     }
 }

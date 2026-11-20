@@ -11,8 +11,51 @@ struct PlayEntry: Codable {
     var album: String
     var key: String   // spotify_track_uri、無ければ track|artist
     var ep: Bool      // ポッドキャスト／オーディオブック
+    // パース時に1回だけ計算する派生値。集計ではこれを使い、1件ごとの
+    // Calendar呼び出しをなくす（v1.2までホーム画面の表示前に14万件×
+    // 数回のCalendar呼び出しがメインスレッドで走り、固まって見えた）
+    var hour: Int = 0   // 0〜23（端末のタイムゾーン）
+    var wd: Int = 0     // 0=日曜
+    var ord: Int = 0    // 日単位の連番（DayCalc.ordinalと同じ）
+    var mon: Int = 0    // 年*12 + (月-1)
 
     var date: Date { Date(timeIntervalSince1970: Double(t) / 1000.0) }
+
+    init(t: Int64, ms: Int, track: String, artist: String, album: String, key: String, ep: Bool) {
+        self.t = t
+        self.ms = ms
+        self.track = track
+        self.artist = artist
+        self.album = album
+        self.key = key
+        self.ep = ep
+        let d = PlayEntry.derived(t: t)
+        self.hour = d.hour
+        self.wd = d.wd
+        self.ord = d.ord
+        self.mon = d.mon
+    }
+
+    /// 時刻から派生値を計算する（パース時・読み戻し時に1回だけ呼ぶ）
+    static func derived(t: Int64) -> (hour: Int, wd: Int, ord: Int, mon: Int) {
+        let date = Date(timeIntervalSince1970: Double(t) / 1000.0)
+        let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .weekday], from: date)
+        let year = c.year ?? 1970
+        let month = c.month ?? 1
+        return (hour: c.hour ?? 0,
+                wd: (c.weekday ?? 1) - 1,
+                ord: DayCalc.ordinal(date),
+                mon: year * 12 + (month - 1))
+    }
+
+    /// 旧形式の保存データ（派生値なし）を読み替えた後に呼ぶ
+    mutating func refreshDerived() {
+        let d = PlayEntry.derived(t: t)
+        hour = d.hour
+        wd = d.wd
+        ord = d.ord
+        mon = d.mon
+    }
 }
 
 // MARK: - 表示用フォーマット（Web版と表記をそろえる）
@@ -46,6 +89,11 @@ enum Fmt {
     static func monthLabel(_ d: Date) -> String {
         let c = Calendar.current.dateComponents([.year, .month], from: d)
         return "\(c.year ?? 0)年\(c.month ?? 0)月"
+    }
+
+    /// 派生値 mon（年*12 + 月-1）からの月ラベル。集計ではこちらを使う
+    static func monthLabel(mon: Int) -> String {
+        "\(mon / 12)年\(mon % 12 + 1)月"
     }
 
     static let weekdayNames = ["日", "月", "火", "水", "木", "金", "土"] // 0=日曜
@@ -180,17 +228,19 @@ enum HistoryParser {
 /// 約25項目）を全件分メモリに抱えることになり、LiveContainer内では処理が
 /// 事実上止まって見える。ここでは変換済みの小さなPlayEntryだけを保持し、
 /// 元のオブジェクトはその場で捨てる。進捗コールバックつき。
+/// ※v1.3: 走査をバイト単位に変更した。従来の UnicodeScalar 配列化は12MB級
+///   ファイルで約48MBの配列を作り、1件ごとの文字列化も重かった。UTF-8では
+///   マルチバイト文字の各バイトはASCII区切り文字と一致しないため、バイト走査
+///   でも文字列中の { } " を誤認しない。実データ145,432件で従来方式と
+///   結果が完全一致することを確認済み。
 enum StreamingHistoryParser {
     static func parse(data: Data, progress: ((Int) -> Void)? = nil) -> [PlayEntry] {
-        guard let text = String(data: data, encoding: .utf8) else {
-            return HistoryParser.parse(data: data)
-        }
-        let scalars = Array(text.unicodeScalars)
-        let n = scalars.count
+        let bytes = [UInt8](data)
+        let n = bytes.count
         var out: [PlayEntry] = []
         out.reserveCapacity(20000)
         var i = 0
-        while i < n && scalars[i] != "[" { i += 1 }
+        while i < n && bytes[i] != 0x5B { i += 1 } // "["
         i += 1
         var depth = 0
         var inStr = false
@@ -198,26 +248,25 @@ enum StreamingHistoryParser {
         var start = -1
         var converted = 0
         while i < n {
-            let c = scalars[i]
+            let c = bytes[i]
             if inStr {
                 if esc { esc = false }
-                else if c == "\\" { esc = true }
-                else if c == "\"" { inStr = false }
+                else if c == 0x5C { esc = true } // "\"
+                else if c == 0x22 { inStr = false } // """
                 i += 1
                 continue
             }
-            if c == "\"" { inStr = true; i += 1; continue }
-            if c == "{" {
+            if c == 0x22 { inStr = true; i += 1; continue } // """
+            if c == 0x7B { // "{"
                 if depth == 0 { start = i }
                 depth += 1; i += 1; continue
             }
-            if c == "}" {
+            if c == 0x7D { // "}"
                 depth -= 1
                 i += 1
                 if depth == 0 && start >= 0 {
-                    let slice = String(String.UnicodeScalarView(scalars[start..<i]))
-                    if let d = slice.data(using: .utf8),
-                       let obj = try? JSONSerialization.jsonObject(with: d),
+                    let slice = data[start..<i]
+                    if let obj = try? JSONSerialization.jsonObject(with: slice),
                        let dict = obj as? [String: Any],
                        let e = HistoryParser.convertOne(dict) {
                         out.append(e)
@@ -228,11 +277,14 @@ enum StreamingHistoryParser {
                 }
                 continue
             }
-            if c == "]" && depth == 0 { break }
+            if c == 0x5D && depth == 0 { break } // "]"
             i += 1
         }
-        if out.isEmpty && (text.contains("\"ts\"") || text.contains("\"endTime\"")) {
-            return HistoryParser.parse(data: data) // 念のための従来方式フォールバック
+        if out.isEmpty {
+            if let text = String(data: data, encoding: .utf8),
+               text.contains("\"ts\"") || text.contains("\"endTime\"") {
+                return HistoryParser.parse(data: data) // 念のための従来方式フォールバック
+            }
         }
         return out
     }
@@ -305,11 +357,10 @@ enum DayAggregator {
     static func daysPresent(_ list: [PlayEntry]) -> [DayAgg] {
         var map: [Int: DayAgg] = [:]
         for e in list {
-            let ord = DayCalc.ordinal(e.date)
-            var r = map[ord] ?? DayAgg(date: DayCalc.dayStart(e.date))
+            var r = map[e.ord] ?? DayAgg(date: DayCalc.dayStart(e.date))
             r.ms += e.ms
             r.plays += 1
-            map[ord] = r
+            map[e.ord] = r
         }
         return map.values.sorted { $0.date < $1.date }
     }
@@ -319,14 +370,13 @@ enum DayAggregator {
         guard let first = list.first, let last = list.last else { return [] }
         var map: [Int: DayAgg] = [:]
         for e in list {
-            let ord = DayCalc.ordinal(e.date)
-            var r = map[ord] ?? DayAgg(date: DayCalc.dayStart(e.date))
+            var r = map[e.ord] ?? DayAgg(date: DayCalc.dayStart(e.date))
             r.ms += e.ms
             r.plays += 1
-            map[ord] = r
+            map[e.ord] = r
         }
-        let startOrd = DayCalc.ordinal(first.date)
-        let endOrd = DayCalc.ordinal(last.date)
+        let startOrd = first.ord
+        let endOrd = last.ord
         var out: [DayAgg] = []
         out.reserveCapacity(endOrd - startOrd + 1)
         var d = DayCalc.dayStart(first.date)
@@ -357,7 +407,8 @@ struct Insights {
     var topArtistShare: Int    // %
 
     /// list: 期間で絞った再生、all: 読み込んだ全再生（時系列順）
-    static func compute(list: [PlayEntry], all: [PlayEntry]) -> Insights? {
+    /// topArtist: 呼び出し側で既に計算済みのトップアーティスト（再集計を避ける）
+    static func compute(list: [PlayEntry], all: [PlayEntry], topArtist: ArtistAgg?) -> Insights? {
         guard !list.isEmpty else { return nil }
         var totalMs = 0
         var hourPlays = [Int](repeating: 0, count: 24)
@@ -368,20 +419,16 @@ struct Insights {
         var trackPlays: [String: Int] = [:]
         var firstPlay: [String: Int64] = [:]
         var lateMs = 0
-        let cal = Calendar.current
         for e in list {
             totalMs += e.ms
-            let d = e.date
-            let hour = cal.component(.hour, from: d)
-            hourPlays[hour] += 1
-            wdMs[cal.component(.weekday, from: d) - 1] += e.ms
-            let ord = DayCalc.ordinal(d)
-            dayMs[ord, default: 0] += e.ms
-            dayPlays[ord, default: 0] += 1
-            dayDate[ord] = DayCalc.dayStart(d)
+            hourPlays[e.hour] += 1
+            wdMs[e.wd] += e.ms
+            dayMs[e.ord, default: 0] += e.ms
+            dayPlays[e.ord, default: 0] += 1
+            if dayDate[e.ord] == nil { dayDate[e.ord] = DayCalc.dayStart(e.date) }
             trackPlays[e.key, default: 0] += 1
             if firstPlay[e.key] == nil || e.t < firstPlay[e.key]! { firstPlay[e.key] = e.t }
-            if hour < 5 { lateMs += e.ms }
+            if e.hour < 5 { lateMs += e.ms }
         }
 
         var bestOrd = -1, bestMs = -1
@@ -408,8 +455,7 @@ struct Insights {
         let repeatRate = Int((Double(list.count - trackPlays.count) / Double(max(list.count, 1)) * 100).rounded())
         let lateShare = totalMs > 0 ? Int((Double(lateMs) / Double(totalMs) * 100).rounded()) : 0
 
-        let agg = Aggregator.aggregate(list)
-        let topA = Aggregator.sortArtists(agg.artists, byTime: true).first
+        let topA = topArtist
         let topShare = (topA != nil && totalMs > 0) ? Int((Double(topA!.ms) / Double(totalMs) * 100).rounded()) : 0
 
         return Insights(
@@ -457,16 +503,13 @@ struct ArtistInsights {
         var dayPlays: [Int: Int] = [:]
         var dayDate: [Int: Date] = [:]
         var trackAgg: [String: (name: String, plays: Int, ms: Int)] = [:]
-        let cal = Calendar.current
         for e in list {
             totalMs += e.ms
-            let d = e.date
-            hourPlays[cal.component(.hour, from: d)] += 1
-            wdMs[cal.component(.weekday, from: d) - 1] += e.ms
-            let ord = DayCalc.ordinal(d)
-            dayMs[ord, default: 0] += e.ms
-            dayPlays[ord, default: 0] += 1
-            dayDate[ord] = DayCalc.dayStart(d)
+            hourPlays[e.hour] += 1
+            wdMs[e.wd] += e.ms
+            dayMs[e.ord, default: 0] += e.ms
+            dayPlays[e.ord, default: 0] += 1
+            if dayDate[e.ord] == nil { dayDate[e.ord] = DayCalc.dayStart(e.date) }
             var tr = trackAgg[e.key] ?? (name: e.track, plays: 0, ms: 0)
             tr.plays += 1
             tr.ms += e.ms

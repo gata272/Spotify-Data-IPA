@@ -13,7 +13,8 @@ struct HomeView: View {
         // 全件走査すると、画面が表示されるまで固まって見えるため
         let list = self.list
         let agg = Aggregator.aggregate(list)
-        let insights = Insights.compute(list: list, all: store.entries)
+        let topArtist = Aggregator.sortArtists(agg.artists, byTime: true).first
+        let insights = Insights.compute(list: list, all: store.entries, topArtist: topArtist)
         let comparison = Comparator.compare(entries: store.entries, from: model.from, to: model.to,
                                             minMs: model.minMs, includePodcast: model.includePodcast)
         return NavigationStack {

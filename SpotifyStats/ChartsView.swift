@@ -144,15 +144,14 @@ struct ChartsView: View {
     // MARK: - 集計
 
     private var monthItems: [BarItem] {
-        var map: [String: Int] = [:]
-        var order: [String] = []
+        var map: [Int: Int] = [:]
+        var order: [Int] = []
         for e in scoped {
-            let label = Fmt.monthLabel(e.date)
-            if map[label] == nil { order.append(label) }
-            map[label, default: 0] += e.ms
+            if map[e.mon] == nil { order.append(e.mon) }
+            map[e.mon, default: 0] += e.ms
         }
         // entriesは時系列順なので、出現順＝月順になる
-        return order.map { BarItem(label: $0, value: map[$0] ?? 0) }
+        return order.map { BarItem(label: Fmt.monthLabel(mon: $0), value: map[$0] ?? 0) }
     }
 
     private var sortedDayRows: [DayAgg] {
@@ -175,7 +174,7 @@ struct ChartsView: View {
     private var hourItems: [BarItem] {
         var plays = [Int](repeating: 0, count: 24)
         for e in scoped {
-            plays[Calendar.current.component(.hour, from: e.date)] += 1
+            plays[e.hour] += 1
         }
         return (0..<24).map { BarItem(label: "\($0)時台", value: plays[$0]) }
     }
@@ -183,7 +182,7 @@ struct ChartsView: View {
     private var weekdayItems: [BarItem] {
         var ms = [Int](repeating: 0, count: 7)
         for e in scoped {
-            ms[Calendar.current.component(.weekday, from: e.date) - 1] += e.ms
+            ms[e.wd] += e.ms
         }
         return (0..<7).map { BarItem(label: Fmt.weekdayNames[$0] + "曜日", value: ms[$0]) }
     }

@@ -48,7 +48,11 @@ final class StatsStore: ObservableObject {
         if trimmed.hasPrefix("[") {
             if let data = text.data(using: .utf8),
                let decoded = try? JSONDecoder().decode([PlayEntry].self, from: data) {
-                return decoded
+                // v1.0形式の保存データには派生値がないので計算し直す
+                var fixed: [PlayEntry] = []
+                fixed.reserveCapacity(decoded.count)
+                for var e in decoded { e.refreshDerived(); fixed.append(e) }
+                return fixed
             }
             return []
         }
@@ -151,6 +155,8 @@ final class StatsStore: ObservableObject {
             //   14/14 のまま固まって見えた
             let existing = await MainActor.run { [weak self] in self?.entries ?? [] }
             let merged = Self.mergeEntries(existing: existing, fresh: fresh)
+            // 14/14の直後、ホーム画面の準備に入ったことが分かるようにする
+            reporter("集計中…")
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 if fresh.isEmpty {
@@ -208,13 +214,20 @@ final class StatsStore: ObservableObject {
         return out
     }
 
+    /// 重複判定のキー。文字列を作らず構造体で持つ（14万件分の文字列生成を避ける）
+    private struct DedupKey: Hashable {
+        let t: Int64
+        let key: String
+        let ms: Int
+    }
+
     /// 既存データと新規データを重複除去してマージし、時系列順に並べ替える
     nonisolated private static func mergeEntries(existing: [PlayEntry], fresh: [PlayEntry]) -> (entries: [PlayEntry], added: Int) {
-        var seen = Set(existing.map { "\($0.t)|\($0.key)|\($0.ms)" })
+        var seen = Set(existing.map { DedupKey(t: $0.t, key: $0.key, ms: $0.ms) })
         var result = existing
         var added = 0
         for e in fresh {
-            let k = "\(e.t)|\(e.key)|\(e.ms)"
+            let k = DedupKey(t: e.t, key: e.key, ms: e.ms)
             if !seen.contains(k) {
                 seen.insert(k)
                 result.append(e)

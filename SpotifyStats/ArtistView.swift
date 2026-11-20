@@ -168,14 +168,13 @@ struct ArtistView: View {
     }
 
     private var monthItems: [BarItem] {
-        var map: [String: Int] = [:]
-        var order: [String] = []
+        var map: [Int: Int] = [:]
+        var order: [Int] = []
         for e in mine {
-            let label = Fmt.monthLabel(e.date)
-            if map[label] == nil { order.append(label) }
-            map[label, default: 0] += e.ms
+            if map[e.mon] == nil { order.append(e.mon) }
+            map[e.mon, default: 0] += e.ms
         }
-        return order.map { BarItem(label: $0, value: map[$0] ?? 0) }
+        return order.map { BarItem(label: Fmt.monthLabel(mon: $0), value: map[$0] ?? 0) }
     }
 
     private var dayItems: [BarItem] {
@@ -187,7 +186,7 @@ struct ArtistView: View {
     private var hourItems: [BarItem] {
         var plays = [Int](repeating: 0, count: 24)
         for e in mine {
-            plays[Calendar.current.component(.hour, from: e.date)] += 1
+            plays[e.hour] += 1
         }
         return (0..<24).map { BarItem(label: "\($0)時台", value: plays[$0]) }
     }
